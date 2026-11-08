@@ -9,16 +9,13 @@ from flask import Flask, request, jsonify
 import threading
 import urllib3
 
-# Отключаем надоедливые предупреждения о сертификатах
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- Переменные окружения ---
 VK_TOKEN = os.environ.get('VK_TOKEN')
 MAX_TOKEN = os.environ.get('MAX_TOKEN')
 MAX_CHAT_ID = os.environ.get('MAX_CHAT_ID')
 MAX_BOT_TOKEN = os.environ.get('MAX_BOT_TOKEN')
 
-# --- Данные ---
 TOPICS = [
     "ЖКХ и коммунальные услуги", "Дороги и транспорт", "Здравоохранение",
     "Образование", "Социальная поддержка и льготы", "Благоустройство и экология",
@@ -31,13 +28,11 @@ QUESTIONS = [
     "Напишите ваш вопрос:"
 ]
 
-# Состояния
 vk_states = {}
 vk_data = {}
 max_states = {}
 max_data = {}
 
-# --- Excel ---
 def save_to_excel(data):
     filename = 'zayavki.xlsx'
     if not os.path.exists(filename):
@@ -55,7 +50,6 @@ def save_to_excel(data):
     ])
     wb.save(filename)
 
-# --- Отправка в канал MAX (для админов) ---
 def send_to_max_channel(data):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
     text = (
@@ -78,12 +72,11 @@ def send_to_max_channel(data):
     except Exception as e:
         print(f"Ошибка отправки в канал: {e}")
 
-# --- Отправка ответа пользователю в MAX (в личку) ---
 def send_max_message(user_id, text):
     if not MAX_BOT_TOKEN: return
     url = "https://platform-api2.max.ru/messages"
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
-    # user_id передаем в теле запроса, как требует API MAX
+    # Для личных сообщений используем user_id. chat_id не передаем.
     payload = {"text": text, "user_id": user_id}
     try:
         r = requests.post(url, headers=headers, json=payload, verify=False, timeout=10)
@@ -92,7 +85,6 @@ def send_max_message(user_id, text):
     except Exception as e:
         print(f"Ошибка отправки в MAX: {e}")
 
-# --- Логика ВК ---
 def vk_main():
     if not VK_TOKEN: return
     vk_session = vk_api.VkApi(token=VK_TOKEN)
@@ -127,7 +119,6 @@ def vk_main():
                 else:
                     vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
-# --- Flask сервер для MAX ---
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
@@ -173,7 +164,6 @@ def webhook():
         print(f"Ошибка webhook: {e}")
         return jsonify({"success": True}), 200
 
-# --- Запуск ---
 if __name__ == '__main__':
     vk_thread = threading.Thread(target=vk_main)
     vk_thread.daemon = True
