@@ -1,3 +1,4 @@
 vk-api
 openpyxl
 python-dotenv
+aiohttp
