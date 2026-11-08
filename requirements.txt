@@ -3,4 +3,3 @@ openpyxl
 python-dotenv
 flask
 requests
-aiohttp
