@@ -70,6 +70,18 @@ def main():
             user_id = event.user_id
             text = event.text.strip()
 
+            # Игнорируем пустые сообщения (например, нажатие кнопки "Начать")
+            if text == "":
+                if user_id not in user_states:
+                    user_states[user_id] = 0
+                    user_data[user_id] = {}
+                    vk.messages.send(
+                        user_id=user_id,
+                        message="Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0],
+                        random_id=int(time.time())
+                    )
+                continue
+
             if user_id not in user_states:
                 user_states[user_id] = 0
                 user_data[user_id] = {}
