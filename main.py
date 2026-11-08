@@ -70,9 +70,11 @@ def send_to_max_channel(data):
     )
     url = "https://platform-api2.max.ru/messages"
     headers = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
-    params = {"chat_id": MAX_CHAT_ID}
+    payload = {"text": text, "chat_id": MAX_CHAT_ID}
     try:
-        requests.post(url, headers=headers, params=params, json={"text": text}, verify=False, timeout=10)
+        r = requests.post(url, headers=headers, json=payload, verify=False, timeout=10)
+        if r.status_code != 200:
+            print(f"ОШИБКА ОТПРАВКИ В КАНАЛ: {r.status_code} - {r.text}")
     except Exception as e:
         print(f"Ошибка отправки в канал: {e}")
 
@@ -80,11 +82,11 @@ def send_to_max_channel(data):
 def send_max_message(user_id, text):
     if not MAX_BOT_TOKEN: return
     url = "https://platform-api2.max.ru/messages"
-    # Токен в заголовке, ID пользователя в параметрах
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
-    params = {"user_id": user_id}
+    # user_id передаем в теле запроса, как требует API MAX
+    payload = {"text": text, "user_id": user_id}
     try:
-        r = requests.post(url, headers=headers, params=params, json={"text": text}, verify=False, timeout=10)
+        r = requests.post(url, headers=headers, json=payload, verify=False, timeout=10)
         if r.status_code != 200:
             print(f"ОШИБКА ОТПРАВКИ В MAX: {r.status_code} - {r.text}")
     except Exception as e:
@@ -173,12 +175,10 @@ def webhook():
 
 # --- Запуск ---
 if __name__ == '__main__':
-    # Запускаем ВК в фоновом потоке
     vk_thread = threading.Thread(target=vk_main)
     vk_thread.daemon = True
     vk_thread.start()
     
-    # Запускаем Flask сервер
     port = int(os.environ.get('PORT', 3000))
     print(f"Flask сервер запущен на порту {port}")
     app.run(host='0.0.0.0', port=port)
