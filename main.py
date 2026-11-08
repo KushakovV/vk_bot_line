@@ -62,7 +62,7 @@ def send_to_max_channel(data):
         f"📂 **Тематика:** {data.get('topic', '')}\n\n"
         f"💬 **Текст вопроса:**\n{data.get('question', '')}"
     )
-    url = "https://platform-api2.max.ru/messages"
+    url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
     params = {"chat_id": MAX_CHAT_ID}
     try:
@@ -74,7 +74,7 @@ def send_to_max_channel(data):
 
 def send_max_message(user_id, text):
     if not MAX_BOT_TOKEN: return
-    url = "https://platform-api2.max.ru/messages"
+    url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
     # ВАЖНО: user_id передаём как параметр запроса (params), а не в json
     params = {"user_id": user_id}
