@@ -52,24 +52,17 @@ def save_to_excel(data):
     wb.save(filename)
 
 # --- Отправка в канал MAX (для админов) ---
-def send_to_max_channel(data):
-    if not MAX_TOKEN or not MAX_CHAT_ID: return
-    text = (
-        f"📋 **Новая заявка ({data.get('source', 'VK')})**\n\n"
-        f"👤 **ФИО:** {data.get('fio', '')}\n"
-        f"⚧ **Пол:** {data.get('gender', '')}\n"
-        f"🎂 **Возраст:** {data.get('age', '')}\n"
-        f"📍 **Населенный пункт:** {data.get('city', '')}\n"
-        f"📞 **Контакт:** {data.get('contact', '')}\n"
-        f"📂 **Тематика:** {data.get('topic', '')}\n\n"
-        f"💬 **Текст вопроса:**\n{data.get('question', '')}"
-    )
+def send_max_message(user_id, text):
+    if not MAX_BOT_TOKEN: return
     url = "https://platform-api2.max.ru/messages"
-    params = {"access_token": MAX_TOKEN, "chat_id": MAX_CHAT_ID}
+    params = {"access_token": MAX_BOT_TOKEN, "user_id": user_id}
     try:
-        requests.post(url, params=params, json={"text": text}, verify=False, timeout=10)
+        r = requests.post(url, params=params, json={"text": text}, verify=False, timeout=10)
+        # Если MAX ответил не 200, принудительно вызываем ошибку, чтобы она попала в лог Bothost
+        if r.status_code != 200:
+            raise Exception(f"MAX ответил: {r.status_code} - {r.text}")
     except Exception as e:
-        print(f"Ошибка отправки в канал: {e}")
+        raise Exception(f"КРИТИЧЕСКАЯ ОШИБКА ОТПРАВКИ: {e}")
 
 # --- Отправка ответа пользователю в MAX (в личку) ---
 def send_max_message(user_id, text):
