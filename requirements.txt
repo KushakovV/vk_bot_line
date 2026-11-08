@@ -1,4 +1,6 @@
 vk-api
 openpyxl
 python-dotenv
+flask
+requests
 aiohttp
