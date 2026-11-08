@@ -1,21 +1,20 @@
 import os
-import asyncio
-from aiohttp import web
 import vk_api
 from vk_api.longpoll import VkLongPoll, VkEventType
 from openpyxl import Workbook, load_workbook
 from datetime import datetime
+import time
 import requests
-import json
+from flask import Flask, request, jsonify
+import threading
 
 # --- Переменные окружения ---
 VK_TOKEN = os.environ.get('VK_TOKEN')
 MAX_TOKEN = os.environ.get('MAX_TOKEN')
 MAX_CHAT_ID = os.environ.get('MAX_CHAT_ID')
 MAX_BOT_TOKEN = os.environ.get('MAX_BOT_TOKEN')
-PORT = int(os.environ.get('PORT', 3000))
 
-# --- Данные опроса ---
+# --- Данные ---
 TOPICS = [
     "ЖКХ и коммунальные услуги", "Дороги и транспорт", "Здравоохранение",
     "Образование", "Социальная поддержка и льготы", "Благоустройство и экология",
@@ -28,11 +27,9 @@ QUESTIONS = [
     "Напишите ваш вопрос:"
 ]
 
-# Состояния для ВК (в памяти)
+# Состояния
 vk_states = {}
 vk_data = {}
-
-# Состояния для MAX (в памяти)
 max_states = {}
 max_data = {}
 
@@ -56,9 +53,7 @@ def save_to_excel(data):
 
 # --- Отправка в канал MAX ---
 def send_to_max_channel(data):
-    if not MAX_TOKEN or not MAX_CHAT_ID:
-        print("Ошибка: не заданы MAX_TOKEN или MAX_CHAT_ID для отправки в канал")
-        return
+    if not MAX_TOKEN or not MAX_CHAT_ID: return
     text = (
         f"📋 **Новая заявка ({data.get('source', 'VK')})**\n\n"
         f"👤 **ФИО:** {data.get('fio', '')}\n"
@@ -72,16 +67,23 @@ def send_to_max_channel(data):
     url = "https://platform-api2.max.ru/messages"
     params = {"access_token": MAX_TOKEN, "chat_id": MAX_CHAT_ID}
     try:
-        resp = requests.post(url, params=params, json={"text": text})
-        print(f"Отправка в канал MAX: {resp.status_code}")
+        requests.post(url, params=params, json={"text": text}, verify=False, timeout=10)
+    except Exception as e:
+        print(f"Ошибка отправки в канал: {e}")
+
+# --- Отправка ответа пользователю в MAX ---
+def send_max_message(user_id, text):
+    if not MAX_BOT_TOKEN: return
+    url = "https://platform-api2.max.ru/messages"
+    params = {"access_token": MAX_BOT_TOKEN, "user_id": user_id}
+    try:
+        requests.post(url, params=params, json={"text": text}, verify=False, timeout=10)
     except Exception as e:
         print(f"Ошибка отправки в MAX: {e}")
 
-# --- Логика для ВК ---
+# --- Логика ВК ---
 def vk_main():
-    if not VK_TOKEN:
-        print("Нет VK_TOKEN")
-        return
+    if not VK_TOKEN: return
     vk_session = vk_api.VkApi(token=VK_TOKEN)
     vk = vk_session.get_api()
     longpoll = VkLongPoll(vk_session)
@@ -94,12 +96,12 @@ def vk_main():
             if user_id not in vk_states:
                 vk_states[user_id] = 0
                 vk_data[user_id] = {'source': 'VK'}
-                vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0], random_id=int(datetime.now().timestamp()*1000))
+                vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0], random_id=int(time.time()))
             else:
                 state = vk_states[user_id]
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
-                        vk.messages.send(user_id=user_id, message="Введите число от 1 до 10.", random_id=int(datetime.now().timestamp()*1000))
+                        vk.messages.send(user_id=user_id, message="Введите число от 1 до 10.", random_id=int(time.time()))
                         continue
                     vk_data[user_id]['topic'] = TOPICS[int(text)-1]
                 else:
@@ -107,38 +109,41 @@ def vk_main():
                     vk_data[user_id][keys[state]] = text
                 vk_states[user_id] += 1
                 if vk_states[user_id] >= len(QUESTIONS):
-                    vk.messages.send(user_id=user_id, message="Спасибо! Обращение принято.", random_id=int(datetime.now().timestamp()*1000))
+                    vk.messages.send(user_id=user_id, message="Спасибо! Обращение принято.", random_id=int(time.time()))
                     save_to_excel(vk_data[user_id])
                     send_to_max_channel(vk_data[user_id])
                     del vk_states[user_id]; del vk_data[user_id]
                 else:
-                    vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(datetime.now().timestamp()*1000))
+                    vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
-# --- Логика для MAX (Webhook) ---
-async def max_webhook(request):
+# --- Flask сервер для MAX ---
+app = Flask(__name__)
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    print("!!! ПОЛУЧЕН ЗАПРОС ОТ MAX !!!")
     try:
-        update = await request.json()
+        update = request.json
         if update.get('update_type') == 'message_created':
             message = update.get('message', {})
-            chat_id = message.get('recipient', {}).get('chat_id')
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
             
-            if not text or not chat_id:
-                return web.Response(status=200)
+            if not text or not user_id:
+                return jsonify({"success": True}), 200
 
-            key = str(chat_id)
+            key = str(user_id)
 
             if key not in max_states:
                 max_states[key] = 0
                 max_data[key] = {'source': 'MAX'}
-                await send_max_message(chat_id, "Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0])
+                send_max_message(user_id, "Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0])
             else:
                 state = max_states[key]
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
-                        await send_max_message(chat_id, "Введите число от 1 до 10.")
-                        return web.Response(status=200)
+                        send_max_message(user_id, "Введите число от 1 до 10.")
+                        return jsonify({"success": True}), 200
                     max_data[key]['topic'] = TOPICS[int(text)-1]
                 else:
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
@@ -146,45 +151,25 @@ async def max_webhook(request):
                 
                 max_states[key] += 1
                 if max_states[key] >= len(QUESTIONS):
-                    await send_max_message(chat_id, "Спасибо! Обращение принято.")
+                    send_max_message(user_id, "Спасибо! Обращение принято.")
                     save_to_excel(max_data[key])
                     send_to_max_channel(max_data[key])
                     del max_states[key]; del max_data[key]
                 else:
-                    await send_max_message(chat_id, QUESTIONS[max_states[key]])
-        return web.Response(status=200)
+                    send_max_message(user_id, QUESTIONS[max_states[key]])
+        return jsonify({"success": True}), 200
     except Exception as e:
         print(f"Ошибка webhook: {e}")
-        return web.Response(status=200)
-
-async def send_max_message(chat_id, text):
-    if not MAX_BOT_TOKEN: return
-    url = "https://platform-api2.max.ru/messages"
-    params = {"access_token": MAX_BOT_TOKEN, "chat_id": chat_id}
-    try:
-        async with request.app['session'].post(url, params=params, json={"text": text}) as resp:
-            pass
-    except Exception as e:
-        print(f"Ошибка отправки в MAX (webhook): {e}")
+        return jsonify({"success": True}), 200
 
 # --- Запуск ---
-async def start_vk_thread(app):
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, vk_main)
-
-async def main():
-    app = web.Application()
-    app['session'] = requests.Session()
-    app.router.add_post('/webhook', max_webhook)
-    
-    asyncio.create_task(start_vk_thread(app))
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    print(f"Сервер запущен на порту {PORT}, ждем MAX webhook...")
-    await asyncio.Event().wait()
-
 if __name__ == '__main__':
-    asyncio.run(main())
+    # Запускаем ВК в фоновом потоке
+    vk_thread = threading.Thread(target=vk_main)
+    vk_thread.daemon = True
+    vk_thread.start()
+    
+    # Запускаем Flask сервер (Bothost сам подставит нужный порт)
+    port = int(os.environ.get('PORT', 3000))
+    print(f"Flask сервер запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port)
