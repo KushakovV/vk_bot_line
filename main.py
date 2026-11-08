@@ -52,24 +52,15 @@ def save_to_excel(data):
     wb.save(filename)
 
 # --- Отправка в канал MAX ---
-def send_to_max_channel(data):
-    if not MAX_TOKEN or not MAX_CHAT_ID: return
-    text = (
-        f"📋 **Новая заявка ({data.get('source', 'VK')})**\n\n"
-        f"👤 **ФИО:** {data.get('fio', '')}\n"
-        f"⚧ **Пол:** {data.get('gender', '')}\n"
-        f"🎂 **Возраст:** {data.get('age', '')}\n"
-        f"📍 **Населенный пункт:** {data.get('city', '')}\n"
-        f"📞 **Контакт:** {data.get('contact', '')}\n"
-        f"📂 **Тематика:** {data.get('topic', '')}\n\n"
-        f"💬 **Текст вопроса:**\n{data.get('question', '')}"
-    )
+def send_max_message(user_id, text):
+    if not MAX_BOT_TOKEN: return
     url = "https://platform-api2.max.ru/messages"
-    params = {"access_token": MAX_TOKEN, "chat_id": MAX_CHAT_ID}
+    # Для личных сообщений используем user_id, а не chat_id
+    params = {"access_token": MAX_BOT_TOKEN, "user_id": user_id}
     try:
         requests.post(url, params=params, json={"text": text}, verify=False, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки в канал: {e}")
+        print(f"Ошибка отправки в MAX: {e}")
 
 # --- Отправка ответа пользователю в MAX ---
 def send_max_message(user_id, text):
