@@ -72,16 +72,21 @@ def send_to_max_channel(data):
     except Exception as e:
         print(f"Ошибка отправки в канал: {e}")
 
-def send_max_message(user_id, text):
+def send_max_message(user_id, text, chat_type="dialog"):
     if not MAX_BOT_TOKEN: return
     url = "https://platform-api2.max.ru/messages"
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
-    # Для личных сообщений используем user_id. chat_id не передаем.
-    payload = {"text": text, "user_id": user_id}
+    
+    # Для личных диалогов используем только user_id
+    if chat_type == "dialog":
+        payload = {"text": text, "user_id": user_id}
+    else:
+        payload = {"text": text, "chat_id": user_id}
+    
     try:
         r = requests.post(url, headers=headers, json=payload, verify=False, timeout=10)
         if r.status_code != 200:
-            print(f"ОШИБКА ОТПРАВКИ В MAX: {r.status_code} - {r.text}")
+            print(f"ОШИБКА ОТПРАВКИ В MAX (chat_type={chat_type}): {r.status_code} - {r.text}")
     except Exception as e:
         print(f"Ошибка отправки в MAX: {e}")
 
@@ -130,6 +135,8 @@ def webhook():
             
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
+            # Получаем тип чата из recipient
+            chat_type = message.get('recipient', {}).get('chat_type', 'dialog')
             
             if not text or not user_id:
                 return jsonify({"success": True}), 200
@@ -139,12 +146,12 @@ def webhook():
             if key not in max_states:
                 max_states[key] = 0
                 max_data[key] = {'source': 'MAX'}
-                send_max_message(user_id, "Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0])
+                send_max_message(user_id, "Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0], chat_type)
             else:
                 state = max_states[key]
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
-                        send_max_message(user_id, "Введите число от 1 до 10.")
+                        send_max_message(user_id, "Введите число от 1 до 10.", chat_type)
                         return jsonify({"success": True}), 200
                     max_data[key]['topic'] = TOPICS[int(text)-1]
                 else:
@@ -153,12 +160,12 @@ def webhook():
                 
                 max_states[key] += 1
                 if max_states[key] >= len(QUESTIONS):
-                    send_max_message(user_id, "Спасибо! Обращение принято.")
+                    send_max_message(user_id, "Спасибо! Обращение принято.", chat_type)
                     save_to_excel(max_data[key])
                     send_to_max_channel(max_data[key])
                     del max_states[key]; del max_data[key]
                 else:
-                    send_max_message(user_id, QUESTIONS[max_states[key]])
+                    send_max_message(user_id, QUESTIONS[max_states[key]], chat_type)
         return jsonify({"success": True}), 200
     except Exception as e:
         print(f"Ошибка webhook: {e}")
