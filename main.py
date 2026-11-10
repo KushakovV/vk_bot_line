@@ -60,11 +60,9 @@ def create_yandex_folder(folder_name):
 def get_folder_public_url(folder_name):
     if not YANDEX_TOKEN: return None
     folder_path = f"/{YANDEX_BASE_FOLDER}/{folder_name}"
-    # Публикуем папку
     r = yandex_api_request('PUT', '/resources/publish', params={'path': folder_path})
     if not r or r.status_code != 200:
         raise Exception(f"Не удалось опубликовать папку: {r.text if r else 'no response'}")
-    # Получаем ссылку
     r = yandex_api_request('GET', '/resources', params={'path': folder_path, 'fields': 'public_url'})
     if r and r.status_code == 200:
         return r.json().get('public_url')
@@ -93,18 +91,23 @@ def download_vk_attachment(attachment):
         url = None
         filename = "attachment"
         ext = "dat"
-        if attachment['type'] == 'photo':
+        
+        # ВК присылает разные структуры для разных типов
+        if attachment.get('type') == 'photo':
             sizes = attachment['photo']['sizes']
             url = max(sizes, key=lambda x: x.get('width', 0) * x.get('height', 0))['url']
             ext = "jpg"
             filename = f"photo_{attachment['photo']['id']}.{ext}"
-        elif attachment['type'] == 'doc':
+        elif attachment.get('type') == 'doc':
             url = attachment['doc']['url']
             ext = attachment['doc'].get('ext', 'dat')
             filename = f"doc_{attachment['doc']['id']}.{ext}"
-        elif attachment['type'] == 'video':
+        elif attachment.get('type') == 'video':
+            # Для видео в ВК нужна авторизация, поэтому пропускаем
             return None, None, None
+            
         if not url: return None, None, None
+        
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         return resp.content, filename, ext
@@ -189,9 +192,16 @@ def vk_main():
             user_id = event.user_id
             text = event.text.strip()
             
-            raw_message = event.raw[0] if event.raw else {}
-            attachments = raw_message.get('attachments', [])
-            
+            attachments = []
+            # Запрашиваем ПОЛНУЮ информацию о сообщении, чтобы получить нормальные вложения
+            if event.message_id:
+                try:
+                    msg_data = vk.messages.getById(message_ids=event.message_id)
+                    if msg_data and 'items' in msg_data and len(msg_data['items']) > 0:
+                        attachments = msg_data['items'][0].get('attachments', [])
+                except Exception as e:
+                    print(f"Ошибка получения сообщения ВК: {e}")
+
             if text == "" and not attachments: 
                 continue
             
@@ -210,7 +220,6 @@ def vk_main():
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     vk_data[user_id][keys[state]] = text
                 
-                # Если пришли файлы на последнем шаге (или на любом другом)
                 if attachments:
                     folder_name = f"Сообщение_{user_id}_{int(time.time())}"
                     create_yandex_folder(folder_name)
@@ -225,7 +234,6 @@ def vk_main():
                             print(f"!!! ОШИБКА ВК: {e}")
                     
                     if has_files:
-                        # Получаем ОДНУ ссылку на всю папку
                         folder_link = get_folder_public_url(folder_name)
                         vk_data[user_id]['folder_link'] = folder_link
                 
