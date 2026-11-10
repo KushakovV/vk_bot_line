@@ -24,12 +24,17 @@ TOPICS = [
     "Образование", "Социальная поддержка и льготы", "Благоустройство и экология",
     "Работа и занятость", "Сельское хозяйство", "Строительство и земельные вопросы", "Другое"
 ]
+
+# ОБЩИЕ ВОПРОСЫ (все, кроме последнего)
 QUESTIONS = [
-    "Введите ваше ФИО:", "Укажите ваш пол (М/Ж):", "Укажите ваш возраст (число):",
-    "Укажите ваш населенный пункт:", "Укажите ваш телефон или почту для связи:",
-    "Выберите тематику (напишите номер от 1 до 10):\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(TOPICS)]),
-    "Напишите ваш вопрос:"
+    "Введите ваше ФИО", "Укажите ваш пол (М/Ж)", "Укажите ваш возраст (число полных лет)",
+    "Укажите ваш населенный пункт", "Укажите ваш телефон или почту для связи",
+    "Выберите тематику (напишите номер от 1 до 10)\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(TOPICS)])
 ]
+
+# Специальные последние вопросы
+VK_LAST_QUESTION = "Напишите ваш вопрос (можно приложить фото)"
+MAX_LAST_QUESTION = "Напишите ваш вопрос (можно приложить медиафайл)"
 
 vk_states = {}
 vk_data = {}
@@ -99,6 +104,7 @@ def download_vk_attachment(attachment):
             ext = attachment['doc'].get('ext', 'dat')
             filename = f"doc_{attachment['doc']['id']}.{ext}"
         elif attachment.get('type') == 'video':
+            print("Видео из ВК пропущено (нет прямой ссылки)")
             return None, None, None
             
         if not url: return None, None, None
@@ -150,7 +156,6 @@ def send_to_max_channel(data):
     if data.get('file_links'):
         files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links')
     
-    # Убрали все **, теперь просто аккуратный текст
     text = (
         f"Новое сообщение ({data.get('source', 'VK')})\n\n"
         f"ФИО: {data.get('fio', '')}\n"
@@ -235,13 +240,19 @@ def vk_main():
                         vk_data[user_id]['file_links'] = "\n".join(links)
                 
                 vk_states[user_id] += 1
+                
+                # Проверяем, закончились ли вопросы (в QUESTIONS теперь 6 элементов)
                 if vk_states[user_id] >= len(QUESTIONS):
                     vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
                     save_to_excel(vk_data[user_id])
                     send_to_max_channel(vk_data[user_id])
                     del vk_states[user_id]; del vk_data[user_id]
                 else:
-                    vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
+                    # Если это был предпоследний ответ (тематика), задаем последний вопрос с фото
+                    if vk_states[user_id] == len(QUESTIONS) - 1:
+                        vk.messages.send(user_id=user_id, message=VK_LAST_QUESTION, random_id=int(time.time()))
+                    else:
+                        vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
 # --- Flask сервер для MAX ---
 app = Flask(__name__)
@@ -305,13 +316,18 @@ def webhook():
                         max_data[key]['file_links'] = "\n".join(links)
                 
                 max_states[key] += 1
+                
                 if max_states[key] >= len(QUESTIONS):
                     send_max_message(user_id, "Спасибо! Сообщение принято.")
                     save_to_excel(max_data[key])
                     send_to_max_channel(max_data[key])
                     del max_states[key]; del max_data[key]
                 else:
-                    send_max_message(user_id, QUESTIONS[max_states[key]])
+                    # Если это был предпоследний ответ (тематика), задаем последний вопрос с медиа
+                    if max_states[key] == len(QUESTIONS) - 1:
+                        send_max_message(user_id, MAX_LAST_QUESTION)
+                    else:
+                        send_max_message(user_id, QUESTIONS[max_states[key]])
         return jsonify({"success": True}), 200
     except Exception as e:
         print(f"ОШИБКА WEBHOOK: {e}")
