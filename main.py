@@ -128,7 +128,14 @@ def webhook():
         
         # Обработка нажатия кнопки "Начать" в MAX
         if update_type == 'bot_started':
-            user_id = update.get('user', {}).get('user_id') or update.get('sender', {}).get('user_id')
+            print(f"ПОЛУЧЕНО СОБЫТИЕ BOT_STARTED: {update}")
+            # Пытаемся вытащить user_id из разных возможных мест
+            user_id = None
+            if 'user' in update and isinstance(update['user'], dict):
+                user_id = update['user'].get('user_id')
+            if not user_id and 'sender' in update and isinstance(update['sender'], dict):
+                user_id = update['sender'].get('user_id')
+            
             if user_id:
                 key = str(user_id)
                 if key in max_states: del max_states[key]
