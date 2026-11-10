@@ -8,7 +8,7 @@ import requests
 from flask import Flask, request, jsonify
 import threading
 import urllib3
-from yndx_disk.clients import DiskClient  # Библиотека для Яндекс Диска
+import urllib.parse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -18,8 +18,7 @@ MAX_CHAT_ID = os.environ.get('MAX_CHAT_ID')
 MAX_BOT_TOKEN = os.environ.get('MAX_BOT_TOKEN')
 YANDEX_TOKEN = os.environ.get('YANDEX_TOKEN')
 
-# Путь к папке на Яндекс Диске (создадим при первом обращении)
-YANDEX_BASE_FOLDER = "/Материалы к сообщениям жителей Костромской области"
+YANDEX_BASE_FOLDER = "Материалы к сообщениям жителей Костромской области"
 
 TOPICS = [
     "ЖКХ и коммунальные услуги", "Дороги и транспорт", "Здравоохранение",
@@ -38,52 +37,73 @@ vk_data = {}
 max_states = {}
 max_data = {}
 
-# --- Яндекс Диск ---
-def upload_to_yandex_disk(file_bytes, filename, folder_name):
-    """Загружает файл на Яндекс Диск и возвращает публичную ссылку."""
-    if not YANDEX_TOKEN:
-        print("Ошибка: не задан YANDEX_TOKEN")
-        return None
-    
+# --- Яндекс Диск (напрямую через requests) ---
+def yandex_api_request(method, endpoint, params=None, data=None, files=None):
+    url = f"https://cloud-api.yandex.net/v1/disk{endpoint}"
+    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
     try:
-        client = DiskClient(token=YANDEX_TOKEN)
-        folder_path = f"{YANDEX_BASE_FOLDER}/{folder_name}"
-        
-        # Создаём папку, если её нет
-        try:
-            client.mkdir(folder_path)
-        except Exception:
-            pass  # Папка уже существует — это нормально
-        
-        # Сохраняем файл локально (временная папка на Bothost)
-        local_path = f"/tmp/{filename}"
-        with open(local_path, "wb") as f:
-            f.write(file_bytes)
-        
-        # Загружаем на Диск
-        remote_path = f"{folder_path}/{filename}"
-        client.upload_file(local_path, remote_path, overwrite=True)
-        
-        # Получаем публичную ссылку
-        public_url = client.get_public_url(remote_path)
-        
-        # Удаляем временный файл
-        os.remove(local_path)
-        
-        return public_url
+        if method == 'GET':
+            r = requests.get(url, headers=headers, params=params, timeout=30)
+        elif method == 'PUT':
+            r = requests.put(url, headers=headers, params=params, timeout=30)
+        elif method == 'POST':
+            r = requests.post(url, headers=headers, params=params, data=data, files=files, timeout=30)
+        return r
     except Exception as e:
-        print(f"Ошибка загрузки на Яндекс Диск: {e}")
+        print(f"Ошибка запроса к Яндекс Диску: {e}")
         return None
 
+def upload_to_yandex_disk(file_bytes, filename, folder_name):
+    if not YANDEX_TOKEN:
+        return None
+    
+    # 1. Создаём папку (игнорируем ошибку, если уже существует)
+    folder_path = f"/{YANDEX_BASE_FOLDER}/{folder_name}"
+    r = yandex_api_request('PUT', '/resources', params={'path': folder_path})
+    # 409 = уже существует, это нормально
+    
+    # 2. Получаем ссылку для загрузки файла
+    remote_path = f"{folder_path}/{filename}"
+    r = yandex_api_request('GET', '/resources/upload', params={'path': remote_path, 'overwrite': 'true'})
+    if not r or r.status_code != 200:
+        print(f"Не удалось получить ссылку для загрузки: {r.text if r else 'no response'}")
+        return None
+    
+    upload_url = r.json().get('href')
+    
+    # 3. Загружаем файл по полученной ссылке
+    try:
+        upload_resp = requests.put(upload_url, data=file_bytes, timeout=60)
+        if upload_resp.status_code not in (200, 201, 202):
+            print(f"Ошибка загрузки файла: {upload_resp.status_code}")
+            return None
+    except Exception as e:
+        print(f"Ошибка загрузки файла: {e}")
+        return None
+    
+    # 4. Публикуем файл, чтобы получить публичную ссылку
+    r = yandex_api_request('PUT', '/resources/publish', params={'path': remote_path})
+    if not r or r.status_code != 200:
+        print(f"Не удалось опубликовать файл: {r.text if r else 'no response'}")
+        return None
+    
+    # 5. Получаем метаинформацию с public_url
+    r = yandex_api_request('GET', '/resources', params={'path': remote_path, 'fields': 'public_url'})
+    if r and r.status_code == 200:
+        public_url = r.json().get('public_url')
+        if public_url:
+            return public_url
+    
+    print("Не удалось получить public_url")
+    return None
+
 def download_vk_attachment(attachment):
-    """Скачивает вложение из ВК по URL и возвращает (bytes, filename, ext)."""
     try:
         url = None
         filename = "attachment"
         ext = "dat"
         
         if attachment['type'] == 'photo':
-            # Берём максимальный размер
             sizes = attachment['photo']['sizes']
             max_size = max(sizes, key=lambda x: x.get('width', 0) * x.get('height', 0))
             url = max_size['url']
@@ -94,8 +114,6 @@ def download_vk_attachment(attachment):
             ext = attachment['doc'].get('ext', 'dat')
             filename = f"doc_{attachment['doc']['id']}"
         elif attachment['type'] == 'video':
-            # Для видео в ВК прямая ссылка недоступна без авторизации,
-            # поэтому просто сохраним информацию
             return None, None, None
         
         if not url:
@@ -103,16 +121,13 @@ def download_vk_attachment(attachment):
         
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
-        
         return resp.content, f"{filename}.{ext}", ext
     except Exception as e:
         print(f"Ошибка скачивания вложения ВК: {e}")
         return None, None, None
 
 def download_max_attachment(attachment):
-    """Скачивает вложение из MAX по URL."""
     try:
-        # MAX присылает вложения с полем url или payload
         url = attachment.get('url') or attachment.get('payload', {}).get('url')
         if not url:
             return None, None, None
@@ -122,7 +137,6 @@ def download_max_attachment(attachment):
         
         resp = requests.get(url, timeout=30, verify=False)
         resp.raise_for_status()
-        
         return resp.content, filename, ext
     except Exception as e:
         print(f"Ошибка скачивания вложения MAX: {e}")
@@ -196,8 +210,6 @@ def vk_main():
         if event.type == VkEventType.MESSAGE_NEW and event.to_me:
             user_id = event.user_id
             text = event.text.strip()
-            
-            # Обработка вложений
             attachments = event.attachments
             file_links = []
             
@@ -205,7 +217,6 @@ def vk_main():
                 for att in attachments:
                     file_bytes, filename, ext = download_vk_attachment(att)
                     if file_bytes:
-                        # Создаём уникальное имя папки для сообщения
                         folder_name = f"Сообщение_{user_id}_{int(time.time())}"
                         public_url = upload_to_yandex_disk(file_bytes, filename, folder_name)
                         if public_url:
@@ -229,7 +240,6 @@ def vk_main():
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     vk_data[user_id][keys[state]] = text
                 
-                # Если есть файлы, сохраняем ссылки
                 if file_links:
                     vk_data[user_id]['file_links'] = "\n".join(file_links)
                 
@@ -256,7 +266,6 @@ def webhook():
                 key = str(user_id)
                 if key in max_states: del max_states[key]
                 if key in max_data: del max_data[key]
-                    
                 max_states[key] = 0
                 max_data[key] = {'source': 'MAX', 'file_links': ''}
                 send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
@@ -266,8 +275,6 @@ def webhook():
             message = update.get('message', {})
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
-            
-            # Обработка вложений MAX
             attachments = message.get('body', {}).get('attachments', [])
             file_links = []
             
@@ -300,7 +307,6 @@ def webhook():
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     max_data[key][keys[state]] = text
                 
-                # Если есть файлы, сохраняем ссылки
                 if file_links:
                     max_data[key]['file_links'] = "\n".join(file_links)
                 
