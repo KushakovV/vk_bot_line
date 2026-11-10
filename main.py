@@ -34,7 +34,7 @@ QUESTIONS = [
 
 # Специальные последние вопросы
 VK_LAST_QUESTION = "Напишите ваш вопрос (можно приложить фото)"
-MAX_LAST_QUESTION = "Напишите ваш вопрос (можно приложить медиафайлы)"
+MAX_LAST_QUESTION = "Напишите ваш вопрос (можно приложить медиафайл)"
 
 vk_states = {}
 vk_data = {}
@@ -143,7 +143,6 @@ def save_to_excel(data):
     ws = wb.active
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Вычисляем номер для текущего сообщения
     row_number = ws.max_row
     
     ws.append([
@@ -153,7 +152,6 @@ def save_to_excel(data):
     ])
     wb.save(filename)
     
-    # Возвращаем номер, чтобы использовать его в канале MAX
     return row_number
 
 def send_to_max_channel(data, msg_number):
@@ -163,8 +161,9 @@ def send_to_max_channel(data, msg_number):
     if data.get('file_links'):
         files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links')
     
+    # Добавили источник в заголовок
     text = (
-        f"Новое сообщение\n"
+        f"Новое сообщение ({data.get('source', 'VK')})\n"
         f"№ {msg_number}\n\n"
         f"ФИО: {data.get('fio', '')}\n"
         f"Пол: {data.get('gender', '')}\n"
@@ -222,19 +221,16 @@ def vk_main():
             else:
                 state = vk_states[user_id]
                 
-                # Проверка тематики (6-й шаг, индекс 5)
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
                         vk.messages.send(user_id=user_id, message="Введите число от 1 до 10.", random_id=int(time.time()))
                         continue
                     vk_data[user_id]['topic'] = TOPICS[int(text)-1]
                 else:
-                    # Сохраняем остальные ответы по порядку
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     if state < len(keys):
                         vk_data[user_id][keys[state]] = text
                 
-                # Обработка файлов
                 if attachments:
                     folder_name = f"Сообщение_{user_id}_{int(time.time())}"
                     create_yandex_folder(folder_name)
@@ -255,16 +251,13 @@ def vk_main():
                 vk_states[user_id] += 1
                 
                 if vk_states[user_id] > len(QUESTIONS):
-                    # Все вопросы пройдены
                     vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
                     msg_num = save_to_excel(vk_data[user_id])
                     send_to_max_channel(vk_data[user_id], msg_num)
                     del vk_states[user_id]; del vk_data[user_id]
                 elif vk_states[user_id] == len(QUESTIONS):
-                    # Задаем последний вопрос с медиа
                     vk.messages.send(user_id=user_id, message=VK_LAST_QUESTION, random_id=int(time.time()))
                 else:
-                    # Задаем стандартный вопрос
                     vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
 # --- Flask сервер для MAX ---
