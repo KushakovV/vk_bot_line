@@ -273,6 +273,7 @@ def webhook():
 
         if update_type == 'message_created':
             message = update.get('message', {})
+            print(f"DEBUG MAX MESSAGE: {message}")
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
             attachments = message.get('body', {}).get('attachments', [])
