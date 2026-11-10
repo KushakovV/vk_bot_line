@@ -53,7 +53,7 @@ def save_to_excel(data):
 def send_to_max_channel(data):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
     text = (
-        f"📋 **Новая заявка ({data.get('source', 'VK')})**\n\n"
+        f"📋 **Новое сообщение ({data.get('source', 'VK')})**\n\n"
         f"👤 **ФИО:** {data.get('fio', '')}\n"
         f"⚧ **Пол:** {data.get('gender', '')}\n"
         f"🎂 **Возраст:** {data.get('age', '')}\n"
@@ -76,7 +76,6 @@ def send_max_message(user_id, text):
     if not MAX_BOT_TOKEN: return
     url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
-    # ВАЖНО: user_id передаём как параметр запроса (params), а не в json
     params = {"user_id": user_id}
     try:
         r = requests.post(url, headers=headers, params=params, json={"text": text}, verify=False, timeout=10)
@@ -99,7 +98,7 @@ def vk_main():
             if user_id not in vk_states:
                 vk_states[user_id] = 0
                 vk_data[user_id] = {'source': 'VK'}
-                vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0], random_id=int(time.time()))
+                vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора сообщений.\n" + QUESTIONS[0], random_id=int(time.time()))
             else:
                 state = vk_states[user_id]
                 if state == 5:
@@ -112,7 +111,7 @@ def vk_main():
                     vk_data[user_id][keys[state]] = text
                 vk_states[user_id] += 1
                 if vk_states[user_id] >= len(QUESTIONS):
-                    vk.messages.send(user_id=user_id, message="Спасибо! Обращение принято.", random_id=int(time.time()))
+                    vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
                     save_to_excel(vk_data[user_id])
                     send_to_max_channel(vk_data[user_id])
                     del vk_states[user_id]; del vk_data[user_id]
@@ -125,9 +124,24 @@ app = Flask(__name__)
 def webhook():
     try:
         update = request.json
-        if update.get('update_type') == 'message_created':
+        update_type = update.get('update_type')
+        
+        # Обработка нажатия кнопки "Начать" в MAX
+        if update_type == 'bot_started':
+            user_id = update.get('user', {}).get('user_id') or update.get('sender', {}).get('user_id')
+            if user_id:
+                key = str(user_id)
+                if key in max_states: del max_states[key]
+                if key in max_data: del max_data[key]
+                    
+                max_states[key] = 0
+                max_data[key] = {'source': 'MAX'}
+                send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
+            return jsonify({"success": True}), 200
+
+        # Обработка обычных сообщений в MAX
+        if update_type == 'message_created':
             message = update.get('message', {})
-            
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
             
@@ -139,7 +153,7 @@ def webhook():
             if key not in max_states:
                 max_states[key] = 0
                 max_data[key] = {'source': 'MAX'}
-                send_max_message(user_id, "Здравствуйте! Это бот для сбора обращений.\n" + QUESTIONS[0])
+                send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
             else:
                 state = max_states[key]
                 if state == 5:
@@ -153,7 +167,7 @@ def webhook():
                 
                 max_states[key] += 1
                 if max_states[key] >= len(QUESTIONS):
-                    send_max_message(user_id, "Спасибо! Обращение принято.")
+                    send_max_message(user_id, "Спасибо! Сообщение принято.")
                     save_to_excel(max_data[key])
                     send_to_max_channel(max_data[key])
                     del max_states[key]; del max_data[key]
