@@ -8,6 +8,7 @@ import requests
 from flask import Flask, request, jsonify
 import threading
 import urllib3
+from yndx_disk.clients import DiskClient  # Библиотека для Яндекс Диска
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -15,6 +16,10 @@ VK_TOKEN = os.environ.get('VK_TOKEN')
 MAX_TOKEN = os.environ.get('MAX_TOKEN')
 MAX_CHAT_ID = os.environ.get('MAX_CHAT_ID')
 MAX_BOT_TOKEN = os.environ.get('MAX_BOT_TOKEN')
+YANDEX_TOKEN = os.environ.get('YANDEX_TOKEN')
+
+# Путь к папке на Яндекс Диске (создадим при первом обращении)
+YANDEX_BASE_FOLDER = "/Материалы к сообщениям жителей Костромской области"
 
 TOPICS = [
     "ЖКХ и коммунальные услуги", "Дороги и транспорт", "Здравоохранение",
@@ -33,12 +38,102 @@ vk_data = {}
 max_states = {}
 max_data = {}
 
+# --- Яндекс Диск ---
+def upload_to_yandex_disk(file_bytes, filename, folder_name):
+    """Загружает файл на Яндекс Диск и возвращает публичную ссылку."""
+    if not YANDEX_TOKEN:
+        print("Ошибка: не задан YANDEX_TOKEN")
+        return None
+    
+    try:
+        client = DiskClient(token=YANDEX_TOKEN)
+        folder_path = f"{YANDEX_BASE_FOLDER}/{folder_name}"
+        
+        # Создаём папку, если её нет
+        try:
+            client.mkdir(folder_path)
+        except Exception:
+            pass  # Папка уже существует — это нормально
+        
+        # Сохраняем файл локально (временная папка на Bothost)
+        local_path = f"/tmp/{filename}"
+        with open(local_path, "wb") as f:
+            f.write(file_bytes)
+        
+        # Загружаем на Диск
+        remote_path = f"{folder_path}/{filename}"
+        client.upload_file(local_path, remote_path, overwrite=True)
+        
+        # Получаем публичную ссылку
+        public_url = client.get_public_url(remote_path)
+        
+        # Удаляем временный файл
+        os.remove(local_path)
+        
+        return public_url
+    except Exception as e:
+        print(f"Ошибка загрузки на Яндекс Диск: {e}")
+        return None
+
+def download_vk_attachment(attachment):
+    """Скачивает вложение из ВК по URL и возвращает (bytes, filename, ext)."""
+    try:
+        url = None
+        filename = "attachment"
+        ext = "dat"
+        
+        if attachment['type'] == 'photo':
+            # Берём максимальный размер
+            sizes = attachment['photo']['sizes']
+            max_size = max(sizes, key=lambda x: x.get('width', 0) * x.get('height', 0))
+            url = max_size['url']
+            ext = "jpg"
+            filename = f"photo_{attachment['photo']['id']}"
+        elif attachment['type'] == 'doc':
+            url = attachment['doc']['url']
+            ext = attachment['doc'].get('ext', 'dat')
+            filename = f"doc_{attachment['doc']['id']}"
+        elif attachment['type'] == 'video':
+            # Для видео в ВК прямая ссылка недоступна без авторизации,
+            # поэтому просто сохраним информацию
+            return None, None, None
+        
+        if not url:
+            return None, None, None
+        
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        
+        return resp.content, f"{filename}.{ext}", ext
+    except Exception as e:
+        print(f"Ошибка скачивания вложения ВК: {e}")
+        return None, None, None
+
+def download_max_attachment(attachment):
+    """Скачивает вложение из MAX по URL."""
+    try:
+        # MAX присылает вложения с полем url или payload
+        url = attachment.get('url') or attachment.get('payload', {}).get('url')
+        if not url:
+            return None, None, None
+        
+        filename = attachment.get('filename', f"max_{int(time.time())}")
+        ext = filename.split('.')[-1] if '.' in filename else 'dat'
+        
+        resp = requests.get(url, timeout=30, verify=False)
+        resp.raise_for_status()
+        
+        return resp.content, filename, ext
+    except Exception as e:
+        print(f"Ошибка скачивания вложения MAX: {e}")
+        return None, None, None
+
 def save_to_excel(data):
     filename = 'zayavki.xlsx'
     if not os.path.exists(filename):
         wb = Workbook()
         ws = wb.active
-        ws.append(['№', 'Дата', 'Источник', 'ФИО', 'Пол', 'Возраст', 'Населенный пункт', 'Контакт', 'Тематика', 'Вопрос'])
+        ws.append(['№', 'Дата', 'Источник', 'ФИО', 'Пол', 'Возраст', 'Населенный пункт', 'Контакт', 'Тематика', 'Вопрос', 'Ссылки на файлы'])
         wb.save(filename)
     wb = load_workbook(filename)
     ws = wb.active
@@ -46,12 +141,18 @@ def save_to_excel(data):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ws.append([
         row_num, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
-        data.get('age', ''), data.get('city', ''), data.get('contact', ''), data.get('topic', ''), data.get('question', '')
+        data.get('age', ''), data.get('city', ''), data.get('contact', ''), data.get('topic', ''), 
+        data.get('question', ''), data.get('file_links', '')
     ])
     wb.save(filename)
 
 def send_to_max_channel(data):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
+    
+    files_text = ""
+    if data.get('file_links'):
+        files_text = f"\n\n📎 **Файлы:**\n{data.get('file_links')}"
+    
     text = (
         f"📋 **Новое сообщение ({data.get('source', 'VK')})**\n\n"
         f"👤 **ФИО:** {data.get('fio', '')}\n"
@@ -61,6 +162,7 @@ def send_to_max_channel(data):
         f"📞 **Контакт:** {data.get('contact', '')}\n"
         f"📂 **Тематика:** {data.get('topic', '')}\n\n"
         f"💬 **Текст вопроса:**\n{data.get('question', '')}"
+        f"{files_text}"
     )
     url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
@@ -94,10 +196,27 @@ def vk_main():
         if event.type == VkEventType.MESSAGE_NEW and event.to_me:
             user_id = event.user_id
             text = event.text.strip()
-            if text == "": continue
+            
+            # Обработка вложений
+            attachments = event.attachments
+            file_links = []
+            
+            if attachments:
+                for att in attachments:
+                    file_bytes, filename, ext = download_vk_attachment(att)
+                    if file_bytes:
+                        # Создаём уникальное имя папки для сообщения
+                        folder_name = f"Сообщение_{user_id}_{int(time.time())}"
+                        public_url = upload_to_yandex_disk(file_bytes, filename, folder_name)
+                        if public_url:
+                            file_links.append(f"- [{filename}]({public_url})")
+            
+            if text == "" and not file_links: 
+                continue
+            
             if user_id not in vk_states:
                 vk_states[user_id] = 0
-                vk_data[user_id] = {'source': 'VK'}
+                vk_data[user_id] = {'source': 'VK', 'file_links': ''}
                 vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора сообщений.\n" + QUESTIONS[0], random_id=int(time.time()))
             else:
                 state = vk_states[user_id]
@@ -109,6 +228,11 @@ def vk_main():
                 else:
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     vk_data[user_id][keys[state]] = text
+                
+                # Если есть файлы, сохраняем ссылки
+                if file_links:
+                    vk_data[user_id]['file_links'] = "\n".join(file_links)
+                
                 vk_states[user_id] += 1
                 if vk_states[user_id] >= len(QUESTIONS):
                     vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
@@ -126,40 +250,44 @@ def webhook():
         update = request.json
         update_type = update.get('update_type')
         
-        # Обработка нажатия кнопки "Начать" в MAX
         if update_type == 'bot_started':
-            print(f"ПОЛУЧЕНО СОБЫТИЕ BOT_STARTED: {update}")
-            # Пытаемся вытащить user_id из разных возможных мест
-            user_id = None
-            if 'user' in update and isinstance(update['user'], dict):
-                user_id = update['user'].get('user_id')
-            if not user_id and 'sender' in update and isinstance(update['sender'], dict):
-                user_id = update['sender'].get('user_id')
-            
+            user_id = update.get('user', {}).get('user_id') or update.get('sender', {}).get('user_id')
             if user_id:
                 key = str(user_id)
                 if key in max_states: del max_states[key]
                 if key in max_data: del max_data[key]
                     
                 max_states[key] = 0
-                max_data[key] = {'source': 'MAX'}
+                max_data[key] = {'source': 'MAX', 'file_links': ''}
                 send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
             return jsonify({"success": True}), 200
 
-        # Обработка обычных сообщений в MAX
         if update_type == 'message_created':
             message = update.get('message', {})
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
             
-            if not text or not user_id:
+            # Обработка вложений MAX
+            attachments = message.get('body', {}).get('attachments', [])
+            file_links = []
+            
+            if attachments:
+                for att in attachments:
+                    file_bytes, filename, ext = download_max_attachment(att)
+                    if file_bytes:
+                        folder_name = f"Сообщение_MAX_{user_id}_{int(time.time())}"
+                        public_url = upload_to_yandex_disk(file_bytes, filename, folder_name)
+                        if public_url:
+                            file_links.append(f"- [{filename}]({public_url})")
+            
+            if not text and not file_links:
                 return jsonify({"success": True}), 200
 
             key = str(user_id)
 
             if key not in max_states:
                 max_states[key] = 0
-                max_data[key] = {'source': 'MAX'}
+                max_data[key] = {'source': 'MAX', 'file_links': ''}
                 send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
             else:
                 state = max_states[key]
@@ -171,6 +299,10 @@ def webhook():
                 else:
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     max_data[key][keys[state]] = text
+                
+                # Если есть файлы, сохраняем ссылки
+                if file_links:
+                    max_data[key]['file_links'] = "\n".join(file_links)
                 
                 max_states[key] += 1
                 if max_states[key] >= len(QUESTIONS):
