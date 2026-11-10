@@ -8,7 +8,6 @@ import requests
 from flask import Flask, request, jsonify
 import threading
 import urllib3
-import urllib.parse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -50,63 +49,42 @@ def yandex_api_request(method, endpoint, params=None, data=None, files=None):
             r = requests.post(url, headers=headers, params=params, data=data, files=files, timeout=30)
         return r
     except Exception as e:
-        print(f"Ошибка запроса к Яндекс Диску: {e}")
-        return None
+        raise Exception(f"Ошибка запроса к Яндекс Диску: {e}")
 
 def upload_to_yandex_disk(file_bytes, filename, folder_name):
     if not YANDEX_TOKEN:
-        return None
+        raise Exception("Не задан YANDEX_TOKEN")
     
-    # 1. Создаём папку (игнорируем ошибку, если уже существует)
     folder_path = f"/{YANDEX_BASE_FOLDER}/{folder_name}"
-    r = yandex_api_request('PUT', '/resources', params={'path': folder_path})
-    # 409 = уже существует, это нормально
+    yandex_api_request('PUT', '/resources', params={'path': folder_path}) # Создаем папку
     
-    # 2. Получаем ссылку для загрузки файла
     remote_path = f"{folder_path}/{filename}"
     r = yandex_api_request('GET', '/resources/upload', params={'path': remote_path, 'overwrite': 'true'})
     if not r or r.status_code != 200:
-        print(f"Не удалось получить ссылку для загрузки: {r.text if r else 'no response'}")
-        return None
+        raise Exception(f"Не удалось получить ссылку для загрузки: {r.text if r else 'no response'}")
     
     upload_url = r.json().get('href')
+    upload_resp = requests.put(upload_url, data=file_bytes, timeout=60)
+    if upload_resp.status_code not in (200, 201, 202):
+        raise Exception(f"Ошибка загрузки файла на Диск: {upload_resp.status_code}")
     
-    # 3. Загружаем файл по полученной ссылке
-    try:
-        upload_resp = requests.put(upload_url, data=file_bytes, timeout=60)
-        if upload_resp.status_code not in (200, 201, 202):
-            print(f"Ошибка загрузки файла: {upload_resp.status_code}")
-            return None
-    except Exception as e:
-        print(f"Ошибка загрузки файла: {e}")
-        return None
-    
-    # 4. Публикуем файл, чтобы получить публичную ссылку
     r = yandex_api_request('PUT', '/resources/publish', params={'path': remote_path})
     if not r or r.status_code != 200:
-        print(f"Не удалось опубликовать файл: {r.text if r else 'no response'}")
-        return None
+        raise Exception(f"Не удалось опубликовать файл: {r.text if r else 'no response'}")
     
-    # 5. Получаем метаинформацию с public_url
     r = yandex_api_request('GET', '/resources', params={'path': remote_path, 'fields': 'public_url'})
     if r and r.status_code == 200:
-        public_url = r.json().get('public_url')
-        if public_url:
-            return public_url
-    
-    print("Не удалось получить public_url")
-    return None
+        return r.json().get('public_url')
+    raise Exception("Не удалось получить public_url")
 
 def download_vk_attachment(attachment):
     try:
         url = None
         filename = "attachment"
         ext = "dat"
-        
         if attachment['type'] == 'photo':
             sizes = attachment['photo']['sizes']
-            max_size = max(sizes, key=lambda x: x.get('width', 0) * x.get('height', 0))
-            url = max_size['url']
+            url = max(sizes, key=lambda x: x.get('width', 0) * x.get('height', 0))['url']
             ext = "jpg"
             filename = f"photo_{attachment['photo']['id']}"
         elif attachment['type'] == 'doc':
@@ -115,32 +93,29 @@ def download_vk_attachment(attachment):
             filename = f"doc_{attachment['doc']['id']}"
         elif attachment['type'] == 'video':
             return None, None, None
-        
-        if not url:
-            return None, None, None
-        
+        if not url: return None, None, None
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         return resp.content, f"{filename}.{ext}", ext
     except Exception as e:
-        print(f"Ошибка скачивания вложения ВК: {e}")
-        return None, None, None
+        raise Exception(f"Ошибка скачивания вложения ВК: {e}")
 
 def download_max_attachment(attachment):
     try:
+        att_type = attachment.get('type')
         url = attachment.get('url') or attachment.get('payload', {}).get('url')
-        if not url:
-            return None, None, None
         
-        filename = attachment.get('filename', f"max_{int(time.time())}")
+        if not url:
+            raise Exception(f"Не найден URL. Данные вложения: {attachment}")
+        
+        filename = attachment.get('filename', f"max_{int(time.time())}_{att_type}")
         ext = filename.split('.')[-1] if '.' in filename else 'dat'
         
         resp = requests.get(url, timeout=30, verify=False)
         resp.raise_for_status()
         return resp.content, filename, ext
     except Exception as e:
-        print(f"Ошибка скачивания вложения MAX: {e}")
-        return None, None, None
+        raise Exception(f"ОШИБКА СКАЧИВАНИЯ ВЛОЖЕНИЯ MAX: {e}")
 
 def save_to_excel(data):
     filename = 'zayavki.xlsx'
@@ -151,10 +126,9 @@ def save_to_excel(data):
         wb.save(filename)
     wb = load_workbook(filename)
     ws = wb.active
-    row_num = ws.max_row
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ws.append([
-        row_num, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
+        ws.max_row, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
         data.get('age', ''), data.get('city', ''), data.get('contact', ''), data.get('topic', ''), 
         data.get('question', ''), data.get('file_links', '')
     ])
@@ -162,11 +136,7 @@ def save_to_excel(data):
 
 def send_to_max_channel(data):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
-    
-    files_text = ""
-    if data.get('file_links'):
-        files_text = f"\n\n📎 **Файлы:**\n{data.get('file_links')}"
-    
+    files_text = f"\n\n📎 **Файлы:**\n{data.get('file_links')}" if data.get('file_links') else ""
     text = (
         f"📋 **Новое сообщение ({data.get('source', 'VK')})**\n\n"
         f"👤 **ФИО:** {data.get('fio', '')}\n"
@@ -180,25 +150,19 @@ def send_to_max_channel(data):
     )
     url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
-    params = {"chat_id": MAX_CHAT_ID}
     try:
-        r = requests.post(url, headers=headers, params=params, json={"text": text}, verify=False, timeout=10)
-        if r.status_code != 200:
-            print(f"ОШИБКА ОТПРАВКИ В КАНАЛ: {r.status_code} - {r.text}")
+        requests.post(url, headers=headers, params={"chat_id": MAX_CHAT_ID}, json={"text": text}, verify=False, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки в канал: {e}")
+        raise Exception(f"Ошибка отправки в канал: {e}")
 
 def send_max_message(user_id, text):
     if not MAX_BOT_TOKEN: return
     url = "https://botapi.max.ru/messages"
     headers = {"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"}
-    params = {"user_id": user_id}
     try:
-        r = requests.post(url, headers=headers, params=params, json={"text": text}, verify=False, timeout=10)
-        if r.status_code != 200:
-            print(f"ОШИБКА ОТПРАВКИ В MAX: {r.status_code} - {r.text}")
+        requests.post(url, headers=headers, params={"user_id": user_id}, json={"text": text}, verify=False, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки в MAX: {e}")
+        raise Exception(f"Ошибка отправки в MAX: {e}")
 
 def vk_main():
     if not VK_TOKEN: return
@@ -210,20 +174,19 @@ def vk_main():
         if event.type == VkEventType.MESSAGE_NEW and event.to_me:
             user_id = event.user_id
             text = event.text.strip()
-            attachments = event.attachments
             file_links = []
             
-            if attachments:
-                for att in attachments:
-                    file_bytes, filename, ext = download_vk_attachment(att)
-                    if file_bytes:
-                        folder_name = f"Сообщение_{user_id}_{int(time.time())}"
-                        public_url = upload_to_yandex_disk(file_bytes, filename, folder_name)
-                        if public_url:
-                            file_links.append(f"- [{filename}]({public_url})")
+            if event.attachments:
+                for att in event.attachments:
+                    try:
+                        file_bytes, filename, ext = download_vk_attachment(att)
+                        if file_bytes:
+                            public_url = upload_to_yandex_disk(file_bytes, filename, f"Сообщение_{user_id}_{int(time.time())}")
+                            if public_url: file_links.append(f"- [{filename}]({public_url})")
+                    except Exception as e:
+                        raise Exception(f"ОШИБКА ВК: {e}")
             
-            if text == "" and not file_links: 
-                continue
+            if text == "" and not file_links: continue
             
             if user_id not in vk_states:
                 vk_states[user_id] = 0
@@ -240,8 +203,7 @@ def vk_main():
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     vk_data[user_id][keys[state]] = text
                 
-                if file_links:
-                    vk_data[user_id]['file_links'] = "\n".join(file_links)
+                if file_links: vk_data[user_id]['file_links'] = "\n".join(file_links)
                 
                 vk_states[user_id] += 1
                 if vk_states[user_id] >= len(QUESTIONS):
@@ -264,8 +226,6 @@ def webhook():
             user_id = update.get('user', {}).get('user_id') or update.get('sender', {}).get('user_id')
             if user_id:
                 key = str(user_id)
-                if key in max_states: del max_states[key]
-                if key in max_data: del max_data[key]
                 max_states[key] = 0
                 max_data[key] = {'source': 'MAX', 'file_links': ''}
                 send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
@@ -273,7 +233,6 @@ def webhook():
 
         if update_type == 'message_created':
             message = update.get('message', {})
-            print(f"DEBUG MAX MESSAGE: {message}")
             user_id = message.get('sender', {}).get('user_id')
             text = message.get('body', {}).get('text', '').strip()
             attachments = message.get('body', {}).get('attachments', [])
@@ -281,12 +240,13 @@ def webhook():
             
             if attachments:
                 for att in attachments:
-                    file_bytes, filename, ext = download_max_attachment(att)
-                    if file_bytes:
-                        folder_name = f"Сообщение_MAX_{user_id}_{int(time.time())}"
-                        public_url = upload_to_yandex_disk(file_bytes, filename, folder_name)
-                        if public_url:
-                            file_links.append(f"- [{filename}]({public_url})")
+                    try:
+                        file_bytes, filename, ext = download_max_attachment(att)
+                        if file_bytes:
+                            public_url = upload_to_yandex_disk(file_bytes, filename, f"Сообщение_MAX_{user_id}_{int(time.time())}")
+                            if public_url: file_links.append(f"- [{filename}]({public_url})")
+                    except Exception as e:
+                        raise Exception(f"ОШИБКА ОБРАБОТКИ ВЛОЖЕНИЯ: {e}")
             
             if not text and not file_links:
                 return jsonify({"success": True}), 200
@@ -308,8 +268,7 @@ def webhook():
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
                     max_data[key][keys[state]] = text
                 
-                if file_links:
-                    max_data[key]['file_links'] = "\n".join(file_links)
+                if file_links: max_data[key]['file_links'] = "\n".join(file_links)
                 
                 max_states[key] += 1
                 if max_states[key] >= len(QUESTIONS):
@@ -321,7 +280,7 @@ def webhook():
                     send_max_message(user_id, QUESTIONS[max_states[key]])
         return jsonify({"success": True}), 200
     except Exception as e:
-        print(f"Ошибка webhook: {e}")
+        print(f"!!! ОШИБКА WEBHOOK: {e}") # <-- ТЕПЕРЬ ОШИБКА БУДЕТ ВИДНА В ЛОГАХ
         return jsonify({"success": True}), 200
 
 if __name__ == '__main__':
