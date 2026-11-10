@@ -142,14 +142,21 @@ def save_to_excel(data):
     wb = load_workbook(filename)
     ws = wb.active
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Вычисляем номер для текущего сообщения
+    row_number = ws.max_row
+    
     ws.append([
-        ws.max_row, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
+        row_number, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
         data.get('age', ''), data.get('city', ''), data.get('contact', ''), data.get('topic', ''), 
         data.get('question', ''), data.get('file_links', '')
     ])
     wb.save(filename)
+    
+    # Возвращаем номер, чтобы использовать его в канале MAX
+    return row_number
 
-def send_to_max_channel(data):
+def send_to_max_channel(data, msg_number):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
     
     files_text = ""
@@ -157,7 +164,8 @@ def send_to_max_channel(data):
         files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links')
     
     text = (
-        f"Новое сообщение ({data.get('source', 'VK')})\n\n"
+        f"Новое сообщение\n"
+        f"№ {msg_number}\n\n"
         f"ФИО: {data.get('fio', '')}\n"
         f"Пол: {data.get('gender', '')}\n"
         f"Возраст: {data.get('age', '')}\n"
@@ -213,15 +221,20 @@ def vk_main():
                 vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора сообщений.\n" + QUESTIONS[0], random_id=int(time.time()))
             else:
                 state = vk_states[user_id]
+                
+                # Проверка тематики (6-й шаг, индекс 5)
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
                         vk.messages.send(user_id=user_id, message="Введите число от 1 до 10.", random_id=int(time.time()))
                         continue
                     vk_data[user_id]['topic'] = TOPICS[int(text)-1]
                 else:
+                    # Сохраняем остальные ответы по порядку
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
-                    vk_data[user_id][keys[state]] = text
+                    if state < len(keys):
+                        vk_data[user_id][keys[state]] = text
                 
+                # Обработка файлов
                 if attachments:
                     folder_name = f"Сообщение_{user_id}_{int(time.time())}"
                     create_yandex_folder(folder_name)
@@ -241,18 +254,18 @@ def vk_main():
                 
                 vk_states[user_id] += 1
                 
-                # Проверяем, закончились ли вопросы (в QUESTIONS теперь 6 элементов)
-                if vk_states[user_id] >= len(QUESTIONS):
+                if vk_states[user_id] > len(QUESTIONS):
+                    # Все вопросы пройдены
                     vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
-                    save_to_excel(vk_data[user_id])
-                    send_to_max_channel(vk_data[user_id])
+                    msg_num = save_to_excel(vk_data[user_id])
+                    send_to_max_channel(vk_data[user_id], msg_num)
                     del vk_states[user_id]; del vk_data[user_id]
+                elif vk_states[user_id] == len(QUESTIONS):
+                    # Задаем последний вопрос с медиа
+                    vk.messages.send(user_id=user_id, message=VK_LAST_QUESTION, random_id=int(time.time()))
                 else:
-                    # Если это был предпоследний ответ (тематика), задаем последний вопрос с фото
-                    if vk_states[user_id] == len(QUESTIONS) - 1:
-                        vk.messages.send(user_id=user_id, message=VK_LAST_QUESTION, random_id=int(time.time()))
-                    else:
-                        vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
+                    # Задаем стандартный вопрос
+                    vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
 # --- Flask сервер для MAX ---
 app = Flask(__name__)
@@ -289,6 +302,7 @@ def webhook():
                 send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
             else:
                 state = max_states[key]
+                
                 if state == 5:
                     if not text.isdigit() or not (1 <= int(text) <= 10):
                         send_max_message(user_id, "Введите число от 1 до 10.")
@@ -296,7 +310,8 @@ def webhook():
                     max_data[key]['topic'] = TOPICS[int(text)-1]
                 else:
                     keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
-                    max_data[key][keys[state]] = text
+                    if state < len(keys):
+                        max_data[key][keys[state]] = text
                 
                 if attachments:
                     folder_name = f"Сообщение_MAX_{user_id}_{int(time.time())}"
@@ -317,17 +332,15 @@ def webhook():
                 
                 max_states[key] += 1
                 
-                if max_states[key] >= len(QUESTIONS):
+                if max_states[key] > len(QUESTIONS):
                     send_max_message(user_id, "Спасибо! Сообщение принято.")
-                    save_to_excel(max_data[key])
-                    send_to_max_channel(max_data[key])
+                    msg_num = save_to_excel(max_data[key])
+                    send_to_max_channel(max_data[key], msg_num)
                     del max_states[key]; del max_data[key]
+                elif max_states[key] == len(QUESTIONS):
+                    send_max_message(user_id, MAX_LAST_QUESTION)
                 else:
-                    # Если это был предпоследний ответ (тематика), задаем последний вопрос с медиа
-                    if max_states[key] == len(QUESTIONS) - 1:
-                        send_max_message(user_id, MAX_LAST_QUESTION)
-                    else:
-                        send_max_message(user_id, QUESTIONS[max_states[key]])
+                    send_max_message(user_id, QUESTIONS[max_states[key]])
         return jsonify({"success": True}), 200
     except Exception as e:
         print(f"ОШИБКА WEBHOOK: {e}")
