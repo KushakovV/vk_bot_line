@@ -34,7 +34,6 @@ QUESTIONS = [
 VK_LAST_QUESTION = "Напишите ваш вопрос (можно приложить фото)"
 MAX_LAST_QUESTION = "Напишите ваш вопрос (можно приложить медиафайл)"
 
-# Тексты для финала
 THANKS_TEXT = "Спасибо! Сообщение принято."
 FINISHED_TEXT = "Если вы хотите направить еще одно сообщение, напишите мне «Новое сообщение», и я с радостью помогу вам."
 
@@ -42,6 +41,9 @@ vk_states = {}
 vk_data = {}
 max_states = {}
 max_data = {}
+
+# Для защиты от дубликатов MAX
+processed_max_messages = set()
 
 # --- Яндекс Диск ---
 def yandex_api_request(method, endpoint, params=None, data=None, files=None):
@@ -144,25 +146,18 @@ def save_to_excel(data):
     wb = load_workbook(filename)
     ws = wb.active
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     row_number = ws.max_row
-    
     ws.append([
         row_number, now, data.get('source', 'VK'), data.get('fio', ''), data.get('gender', ''),
         data.get('age', ''), data.get('city', ''), data.get('contact', ''), data.get('topic', ''), 
         data.get('question', ''), data.get('file_links', '')
     ])
     wb.save(filename)
-    
     return row_number
 
 def send_to_max_channel(data, msg_number):
     if not MAX_TOKEN or not MAX_CHAT_ID: return
-    
-    files_text = ""
-    if data.get('file_links'):
-        files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links')
-    
+    files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links') if data.get('file_links') else ""
     text = (
         f"Новое сообщение ({data.get('source', 'VK')})\n"
         f"№ {msg_number}\n\n"
@@ -255,9 +250,8 @@ def vk_main():
                 vk_states[user_id] += 1
                 
                 if vk_states[user_id] > len(QUESTIONS):
-                    # ОТПРАВЛЯЕМ ДВА РАЗНЫХ СООБЩЕНИЯ
                     vk.messages.send(user_id=user_id, message=THANKS_TEXT, random_id=int(time.time()))
-                    time.sleep(0.5) # Небольшая пауза для надежности
+                    time.sleep(0.5)
                     vk.messages.send(user_id=user_id, message=FINISHED_TEXT, random_id=int(time.time()) + 1)
                     
                     msg_num = save_to_excel(vk_data[user_id])
@@ -269,7 +263,64 @@ def vk_main():
                     vk.messages.send(user_id=user_id, message=QUESTIONS[vk_states[user_id]], random_id=int(time.time()))
 
 # --- Flask сервер для MAX ---
+
 app = Flask(__name__)
+
+def process_max_message(user_id, text, attachments):
+    key = str(user_id)
+    
+    if key not in max_states:
+        if "новое сообщение" in text:
+            max_states[key] = 0
+            max_data[key] = {'source': 'MAX', 'file_links': ''}
+            send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
+        else:
+            send_max_message(user_id, FINISHED_TEXT)
+    else:
+        state = max_states[key]
+        
+        if state == 5:
+            if not text.isdigit() or not (1 <= int(text) <= 10):
+                send_max_message(user_id, "Введите число от 1 до 10.")
+                return
+            max_data[key]['topic'] = TOPICS[int(text)-1]
+        else:
+            keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
+            if state < len(keys):
+                max_data[key][keys[state]] = text
+        
+        if attachments:
+            folder_name = f"Сообщение_MAX_{user_id}_{int(time.time())}"
+            create_yandex_folder(folder_name)
+            links = []
+            for i, att in enumerate(attachments, 1):
+                try:
+                    file_bytes, filename, ext = download_max_attachment(att)
+                    if file_bytes:
+                        link = upload_to_yandex_disk(file_bytes, filename, folder_name)
+                        if link:
+                            links.append(f"Файл {i}: {link}")
+                except Exception as e:
+                    print(f"ОШИБКА MAX ФАЙЛА: {e}")
+                    
+            if links:
+                max_data[key]['file_links'] = "\n".join(links)
+        
+        max_states[key] += 1
+        
+        if max_states[key] > len(QUESTIONS):
+            send_max_message(user_id, THANKS_TEXT)
+            time.sleep(0.5)
+            send_max_message(user_id, FINISHED_TEXT)
+            
+            msg_num = save_to_excel(max_data[key])
+            send_to_max_channel(max_data[key], msg_num)
+            del max_states[key]; del max_data[key]
+        elif max_states[key] == len(QUESTIONS):
+            send_max_message(user_id, MAX_LAST_QUESTION)
+        else:
+            send_max_message(user_id, QUESTIONS[max_states[key]])
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -292,63 +343,24 @@ def webhook():
             text = message.get('body', {}).get('text', '').strip().lower()
             attachments = message.get('body', {}).get('attachments', [])
             
+            # ЗАЩИТА ОТ ДУБЛИКАТОВ: получаем ID сообщения
+            msg_id = message.get('id') or message.get('message_id')
+            
+            if msg_id and msg_id in processed_max_messages:
+                print(f"Пропущен дубликат сообщения MAX: {msg_id}")
+                return jsonify({"success": True}), 200
+            
+            if msg_id:
+                processed_max_messages.add(msg_id)
+                # Ограничиваем размер памяти, чтобы не рос бесконечно
+                if len(processed_max_messages) > 1000:
+                    processed_max_messages.clear()
+
             if not text and not attachments:
                 return jsonify({"success": True}), 200
 
-            key = str(user_id)
-
-            if key not in max_states:
-                if "новое сообщение" in text:
-                    max_states[key] = 0
-                    max_data[key] = {'source': 'MAX', 'file_links': ''}
-                    send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
-                else:
-                    send_max_message(user_id, FINISHED_TEXT)
-            else:
-                state = max_states[key]
-                
-                if state == 5:
-                    if not text.isdigit() or not (1 <= int(text) <= 10):
-                        send_max_message(user_id, "Введите число от 1 до 10.")
-                        return jsonify({"success": True}), 200
-                    max_data[key]['topic'] = TOPICS[int(text)-1]
-                else:
-                    keys = ['fio', 'gender', 'age', 'city', 'contact', 'topic', 'question']
-                    if state < len(keys):
-                        max_data[key][keys[state]] = text
-                
-                if attachments:
-                    folder_name = f"Сообщение_MAX_{user_id}_{int(time.time())}"
-                    create_yandex_folder(folder_name)
-                    links = []
-                    for i, att in enumerate(attachments, 1):
-                        try:
-                            file_bytes, filename, ext = download_max_attachment(att)
-                            if file_bytes:
-                                link = upload_to_yandex_disk(file_bytes, filename, folder_name)
-                                if link:
-                                    links.append(f"Файл {i}: {link}")
-                        except Exception as e:
-                            print(f"ОШИБКА MAX ФАЙЛА: {e}")
-                            
-                    if links:
-                        max_data[key]['file_links'] = "\n".join(links)
-                
-                max_states[key] += 1
-                
-                if max_states[key] > len(QUESTIONS):
-                    # ОТПРАВЛЯЕМ ДВА РАЗНЫХ СООБЩЕНИЯ
-                    send_max_message(user_id, THANKS_TEXT)
-                    time.sleep(0.5) # Небольшая пауза
-                    send_max_message(user_id, FINISHED_TEXT)
-                    
-                    msg_num = save_to_excel(max_data[key])
-                    send_to_max_channel(max_data[key], msg_num)
-                    del max_states[key]; del max_data[key]
-                elif max_states[key] == len(QUESTIONS):
-                    send_max_message(user_id, MAX_LAST_QUESTION)
-                else:
-                    send_max_message(user_id, QUESTIONS[max_states[key]])
+            threading.Thread(target=process_max_message, args=(user_id, text, attachments)).start()
+            
         return jsonify({"success": True}), 200
     except Exception as e:
         print(f"ОШИБКА WEBHOOK: {e}")
