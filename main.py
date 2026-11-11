@@ -25,16 +25,18 @@ TOPICS = [
     "Работа и занятость", "Сельское хозяйство", "Строительство и земельные вопросы", "Другое"
 ]
 
-# ОБЩИЕ ВОПРОСЫ (все, кроме последнего)
 QUESTIONS = [
     "Введите ваше ФИО", "Укажите ваш пол (М/Ж)", "Укажите ваш возраст (число полных лет)",
     "Укажите ваш населенный пункт", "Укажите ваш телефон или почту для связи",
     "Выберите тематику (напишите номер от 1 до 10)\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(TOPICS)])
 ]
 
-# Специальные последние вопросы
 VK_LAST_QUESTION = "Напишите ваш вопрос (можно приложить фото)"
 MAX_LAST_QUESTION = "Напишите ваш вопрос (можно приложить медиафайл)"
+
+# Тексты для финала
+THANKS_TEXT = "Спасибо! Сообщение принято."
+FINISHED_TEXT = "Если вы хотите направить еще одно сообщение, напишите мне «Новое сообщение», и я с радостью помогу вам."
 
 vk_states = {}
 vk_data = {}
@@ -161,7 +163,6 @@ def send_to_max_channel(data, msg_number):
     if data.get('file_links'):
         files_text = "\n\nПрикрепленные файлы:\n" + data.get('file_links')
     
-    # Добавили источник в заголовок
     text = (
         f"Новое сообщение ({data.get('source', 'VK')})\n"
         f"№ {msg_number}\n\n"
@@ -200,7 +201,7 @@ def vk_main():
     for event in longpoll.listen():
         if event.type == VkEventType.MESSAGE_NEW and event.to_me:
             user_id = event.user_id
-            text = event.text.strip()
+            text = event.text.strip().lower()
             
             attachments = []
             if event.message_id:
@@ -215,9 +216,12 @@ def vk_main():
                 continue
             
             if user_id not in vk_states:
-                vk_states[user_id] = 0
-                vk_data[user_id] = {'source': 'ВКонтакте', 'file_links': ''}
-                vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора сообщений.\n" + QUESTIONS[0], random_id=int(time.time()))
+                if "новое сообщение" in text:
+                    vk_states[user_id] = 0
+                    vk_data[user_id] = {'source': 'ВКонтакте', 'file_links': ''}
+                    vk.messages.send(user_id=user_id, message="Здравствуйте! Это бот для сбора сообщений.\n" + QUESTIONS[0], random_id=int(time.time()))
+                else:
+                    vk.messages.send(user_id=user_id, message=FINISHED_TEXT, random_id=int(time.time()))
             else:
                 state = vk_states[user_id]
                 
@@ -251,7 +255,11 @@ def vk_main():
                 vk_states[user_id] += 1
                 
                 if vk_states[user_id] > len(QUESTIONS):
-                    vk.messages.send(user_id=user_id, message="Спасибо! Сообщение принято.", random_id=int(time.time()))
+                    # ОТПРАВЛЯЕМ ДВА РАЗНЫХ СООБЩЕНИЯ
+                    vk.messages.send(user_id=user_id, message=THANKS_TEXT, random_id=int(time.time()))
+                    time.sleep(0.5) # Небольшая пауза для надежности
+                    vk.messages.send(user_id=user_id, message=FINISHED_TEXT, random_id=int(time.time()) + 1)
+                    
                     msg_num = save_to_excel(vk_data[user_id])
                     send_to_max_channel(vk_data[user_id], msg_num)
                     del vk_states[user_id]; del vk_data[user_id]
@@ -281,7 +289,7 @@ def webhook():
         if update_type == 'message_created':
             message = update.get('message', {})
             user_id = message.get('sender', {}).get('user_id')
-            text = message.get('body', {}).get('text', '').strip()
+            text = message.get('body', {}).get('text', '').strip().lower()
             attachments = message.get('body', {}).get('attachments', [])
             
             if not text and not attachments:
@@ -290,9 +298,12 @@ def webhook():
             key = str(user_id)
 
             if key not in max_states:
-                max_states[key] = 0
-                max_data[key] = {'source': 'MAX', 'file_links': ''}
-                send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
+                if "новое сообщение" in text:
+                    max_states[key] = 0
+                    max_data[key] = {'source': 'MAX', 'file_links': ''}
+                    send_max_message(user_id, "Добрый день! Это бот для сбора сообщений в рамках проведения прямой линии губернатора Костромской области.\n" + QUESTIONS[0])
+                else:
+                    send_max_message(user_id, FINISHED_TEXT)
             else:
                 state = max_states[key]
                 
@@ -326,7 +337,11 @@ def webhook():
                 max_states[key] += 1
                 
                 if max_states[key] > len(QUESTIONS):
-                    send_max_message(user_id, "Спасибо! Сообщение принято.")
+                    # ОТПРАВЛЯЕМ ДВА РАЗНЫХ СООБЩЕНИЯ
+                    send_max_message(user_id, THANKS_TEXT)
+                    time.sleep(0.5) # Небольшая пауза
+                    send_max_message(user_id, FINISHED_TEXT)
+                    
                     msg_num = save_to_excel(max_data[key])
                     send_to_max_channel(max_data[key], msg_num)
                     del max_states[key]; del max_data[key]
